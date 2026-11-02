@@ -451,9 +451,9 @@
             },
             workerUrl: "https://service-unit-worker.tuguns123.workers.dev",
             telegramTopics: {
-                teaching: 2,   // Topic 1: กิจกรรมการเรียนการสอน IIP (thread_id: 2)
-                homeVisit: 4,  // Topic 2: การเยี่ยมบ้านและติดตามผล (thread_id: 4)
-                documents: 6   // Topic 3: เอกสารราชการและแผน IEP/PDF (thread_id: 6)
+                teaching: 23,  // Topic 1: ภาพกิจกรรมการเรียนการสอน (IIP) (thread_id: 23)
+                homeVisit: 24, // Topic 2: ภาพการเยี่ยมบ้านและติดตามผล (thread_id: 24)
+                documents: 25  // Topic 3: เอกสารราชการและแผน IEP/PDF (thread_id: 25)
             }
         };
 
@@ -532,7 +532,96 @@
         };
 
         // ฟังก์ชันส่งรูปภาพไปยัง Cloudflare Worker เพื่อยิงเข้า Telegram Supergroup (คืนค่า Edge Cache URL)
-        const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicId) => {
+                // ฟังก์ชันคำนวณและสร้าง Topic ประจำเดือนอัตโนมัติ (Auto Monthly Topics with Intro Pin)
+        const getOrCreateMonthlyTopicId = async (periodDate, category = 'ทั่วไป') => {
+            if (category && (category.includes('Document') || category.includes('เอกสาร') || category.includes('IEP') || category.includes('PDF'))) {
+                return window.HYBRID_CONFIG?.telegramTopics?.documents || 25;
+            }
+
+            let d = new Date();
+            if (periodDate && typeof periodDate === 'string' && periodDate.includes('-')) {
+                const parts = periodDate.split('-');
+                if (parts.length >= 2) {
+                    const yr = parseInt(parts[0], 10);
+                    const m = parseInt(parts[1], 10) - 1;
+                    if (!isNaN(yr) && !isNaN(m) && m >= 0 && m < 12) {
+                        d = new Date(yr, m, 1);
+                    }
+                }
+            }
+            const monthIndex = d.getMonth();
+            const thaiMonthsList = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
+            const thaiMonth = thaiMonthsList[monthIndex] || 'ประจำเดือน';
+            const christianYear = d.getFullYear();
+            const thaiYear = christianYear > 2400 ? christianYear : christianYear + 543;
+            const monthKey = `${christianYear}_${String(monthIndex + 1).padStart(2, '0')}`;
+            const topicTitle = `📅 ${thaiMonth} ${thaiYear}`;
+            const localKey = `telegram_topic_${monthKey}`;
+
+            try {
+                const cached = localStorage.getItem(localKey);
+                if (cached && Number(cached) > 0) return Number(cached);
+            } catch (e) { }
+
+            if (firestoreDb) {
+                try {
+                    const doc = await firestoreDb.collection('telegram_monthly_topics').doc(monthKey).get();
+                    if (doc.exists && doc.data()?.thread_id) {
+                        const tid = Number(doc.data().thread_id);
+                        try { localStorage.setItem(localKey, String(tid)); } catch (e) { }
+                        return tid;
+                    }
+                } catch (e) {
+                    console.warn("Firestore get monthly topic error:", e);
+                }
+            }
+
+            const workerUrl = window.HYBRID_CONFIG?.workerUrl;
+            if (workerUrl && !workerUrl.includes('your-worker')) {
+                try {
+                    const introMsg = [
+                        `📌 ยินดีต้อนรับสู่ห้อง: ${topicTitle}`,
+                        `🏫 ศูนย์การศึกษาพิเศษ ประจำจังหวัดอุตรดิตถ์ หน่วยบริการน้ำปาด`,
+                        `------------------------------------------------`,
+                        `รวบรวมภาพกิจกรรมการจัดการเรียนการสอน IIP และการเยี่ยมบ้านประจำเดือน`,
+                        `จัดเก็บภาพความละเอียดสูงถาวรบนคลาวด์ พร้อมค้นหาได้จาก #ชื่อนักเรียน หรือ #รหัสนักเรียน`
+                    ].join('\n');
+
+                    const res = await fetch(`${workerUrl}/create-monthly-topic`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: topicTitle,
+                            intro: introMsg
+                        })
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.thread_id) {
+                            const newTid = Number(data.thread_id);
+                            try { localStorage.setItem(localKey, String(newTid)); } catch (e) { }
+                            if (firestoreDb) {
+                                try {
+                                    await firestoreDb.collection('telegram_monthly_topics').doc(monthKey).set({
+                                        thread_id: newTid,
+                                        name: topicTitle,
+                                        createdAt: new Date().toISOString()
+                                    }, { merge: true });
+                                } catch (e) { }
+                            }
+                            console.log(`✅ Auto-created new monthly topic '${topicTitle}' -> Thread ID: ${newTid}`);
+                            return newTid;
+                        }
+                    }
+                } catch (err) {
+                    console.warn("Failed to auto-create monthly topic via worker:", err);
+                }
+            }
+
+            return window.HYBRID_CONFIG?.telegramTopics?.teaching || 23;
+        };
+
+const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicId) => {
             const workerUrl = window.HYBRID_CONFIG?.workerUrl;
             if (!workerUrl || workerUrl.includes('your-worker.workers.dev')) {
                 return base64Data;
@@ -905,13 +994,17 @@
                     // ย่อขนาดรูปภาพในเครื่อง Client-side เป็น WebP (60-100 KB) ทันที
                     const compressedWebP = await compressBase64ToWebP(base64Data, 1280, 0.8);
 
-                    // กำหนด Topic ID ใน Telegram Supergroup ตามประเภท
-                    const isHomeVisit = category && (category.includes('เยี่ยมบ้าน') || category.includes('home'));
-                    const topicId = isHomeVisit
-                        ? (window.HYBRID_CONFIG?.telegramTopics?.homeVisit || 4)
-                        : (window.HYBRID_CONFIG?.telegramTopics?.teaching || 2);
+                    // ดึงหรือสร้าง Topic ประจำเดือนอัตโนมัติ (พร้อมข้อความปักหมุดแนะนำห้อง)
+                    const topicId = await getOrCreateMonthlyTopicId(period, category);
 
-                    const caption = `#${category} | ${period} | ${fileName || 'activity.webp'}`;
+                    // สร้าง Caption ที่มีรายละเอียดชัดเจน ค้นหาได้ง่าย
+                    const dateDisplay = (period && period.includes('-')) ? period : new Date().toLocaleDateString('th-TH');
+                    const caption = [
+                        `#${category || 'กิจกรรม'} #${fileName ? fileName.replace(/\.[^/.]+$/, "") : 'photo'}`,
+                        `🏷️ หมวด: ${category || 'การสอน/เยี่ยมบ้าน'}`,
+                        `📅 วันที่: ${dateDisplay}`,
+                        `🏫 หน่วยบริการน้ำปาด ศกศ.อุตรดิตถ์`
+                    ].join(' | ');
 
                     // ส่งต่อไปยัง Cloudflare Worker ➔ Telegram Group ➔ คืนค่า Edge Cache URL (<30ms)
                     const edgeCachedUrl = await uploadPhotoToTelegramWorker(compressedWebP, fileName || 'photo.webp', caption, topicId);
