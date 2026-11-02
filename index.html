@@ -47,11 +47,9 @@
         href="https://drive.google.com/thumbnail?id=1U7KI5SFQA4RWjlDJXKUr0yNVzD9pe-fw&sz=w192">
     <link rel="apple-touch-icon" sizes="192x192"
         href="https://drive.google.com/thumbnail?id=1U7KI5SFQA4RWjlDJXKUr0yNVzD9pe-fw&sz=w192">
-    <!-- เพิ่มบรรทัดนี้ก่อน 
     <!-- Firebase 10 Compat SDK for Hybrid Cloud Architecture -->
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
-</head> -->
     <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap"
         rel="stylesheet">
     <!-- ✅ Libraries (รวมครบ ไม่ซ้ำ) -->
@@ -27387,6 +27385,7 @@ ${ocrText || '(ระบบ OCR ไม่สามารถอ่านได้
             "การศึกษาตามอัธยาศัย",
             "อื่นๆ"
         ];
+        function getSampleStudentData() { return getDefaultData(); }
         function getDefaultData() {
             return {
                 schoolName: 'ศูนย์การศึกษาพิเศษ ประจำจังหวัดอุตรดิตถ์',
@@ -29230,8 +29229,8 @@ ${ocrText || '(ระบบ OCR ไม่สามารถอ่านได้
                     });
                     if (parsed.curriculum) setCurriculum(parsed.curriculum);
                 } else {
-                    const isNanthakorn = selectedStudent.name.includes('นันทกร');
-                    if (isNanthakorn) {
+                    const isNanthakorn = selectedStudent?.name && selectedStudent.name.includes('นันทกร');
+                    if (isNanthakorn && typeof getSampleStudentData === 'function') {
                         const sample = getSampleStudentData();
                         setIepData({
                             ...sample,
@@ -29293,7 +29292,7 @@ ${ocrText || '(ระบบ OCR ไม่สามารถอ่านได้
                         setIipActiveIndex(0);
                         setIipData({ ...autoPlans[0] });
                     } else {
-                        const isNanthakorn = selectedStudent.name.includes('นันทกร');
+                        const isNanthakorn = selectedStudent?.name && selectedStudent.name.includes('นันทกร');
                         if (isNanthakorn) {
                             const defaultIips = getSampleIIPsForNanthakorn(iepYear);
                             setIipList(defaultIips);
@@ -29316,7 +29315,7 @@ ${ocrText || '(ระบบ OCR ไม่สามารถอ่านได้
                     const parsed = typeof noticeReport.data === 'string' ? JSON.parse(noticeReport.data) : (noticeReport.data || {});
                     setNoticeData(prev => ({ ...prev, ...parsed, year: iepYear }));
                 } else {
-                    const isNanthakorn = selectedStudent.name.includes('นันทกร');
+                    const isNanthakorn = selectedStudent?.name && selectedStudent.name.includes('นันทกร');
                     setNoticeData({
                         year: iepYear,
                         docDate: isNanthakorn ? '๑๘ พฤษภาคม ๒๕๖๙' : '',
