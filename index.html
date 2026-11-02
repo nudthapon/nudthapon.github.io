@@ -480,6 +480,13 @@
                     firebase.initializeApp(window.HYBRID_CONFIG.firebase);
                 }
                 firestoreDb = firebase.firestore();
+                try {
+                    firestoreDb.settings({
+                        experimentalForceLongPolling: true,
+                        useFetchStreams: false,
+                        merge: true
+                    });
+                } catch (e) { }
                 console.log("✅ Firebase Firestore Connected in Hybrid Engine");
             }
         } catch (e) {
@@ -657,11 +664,117 @@ const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicI
             }
         };
 
-        // Firestore Generic Collection Helpers
+        // Firestore REST Decoder & Fast Fetcher / Saver (Ultra-fast direct REST API)
+        const decodeFirestoreREST = (fields) => {
+            if (!fields || typeof fields !== 'object') return {};
+            const res = {};
+            const decodeVal = (v) => {
+                if (!v || typeof v !== 'object') return v;
+                if ('stringValue' in v) return v.stringValue;
+                if ('integerValue' in v) return Number(v.integerValue);
+                if ('doubleValue' in v) return Number(v.doubleValue);
+                if ('booleanValue' in v) return Boolean(v.booleanValue);
+                if ('arrayValue' in v) return (v.arrayValue?.values || []).map(decodeVal);
+                if ('mapValue' in v) return decodeFirestoreREST(v.mapValue?.fields || {});
+                if ('nullValue' in v) return null;
+                return Object.values(v)[0];
+            };
+            for (const [k, v] of Object.entries(fields)) {
+                res[k] = decodeVal(v);
+            }
+            return res;
+        };
+
+        const encodeFirestoreREST = (val) => {
+            if (val === null || val === undefined) return { nullValue: null };
+            if (typeof val === 'boolean') return { booleanValue: val };
+            if (typeof val === 'number') {
+                return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
+            }
+            if (typeof val === 'string') return { stringValue: val };
+            if (Array.isArray(val)) return { arrayValue: { values: val.map(encodeFirestoreREST) } };
+            if (typeof val === 'object') {
+                const fields = {};
+                for (const [k, v] of Object.entries(val)) {
+                    fields[k] = encodeFirestoreREST(v);
+                }
+                return { mapValue: { fields } };
+            }
+            return { stringValue: String(val) };
+        };
+
+        const fetchFirestoreCollectionREST = async (collectionName) => {
+            const pId = window.HYBRID_CONFIG?.firebase?.projectId;
+            if (!pId) return null;
+            try {
+                const url = 'https://firestore.googleapis.com/v1/projects/' + encodeURIComponent(pId) + '/databases/(default)/documents/' + encodeURIComponent(collectionName) + '?pageSize=1000';
+                const resp = await fetch(url);
+                if (!resp.ok) return null;
+                const json = await resp.json();
+                return (json.documents || []).map(doc => {
+                    const docId = decodeURIComponent(doc.name.split('/').pop());
+                    return { id: docId, ...decodeFirestoreREST(doc.fields) };
+                });
+            } catch (e) {
+                console.warn('REST fetch error for ' + collectionName + ':', e);
+                return null;
+            }
+        };
+
+        const saveFirestoreDocREST = async (collectionName, docId, data) => {
+            const pId = window.HYBRID_CONFIG?.firebase?.projectId;
+            if (!pId) return false;
+            try {
+                const id = docId || ('doc_' + Date.now());
+                const fields = {};
+                for (const [k, v] of Object.entries(data)) {
+                    fields[k] = encodeFirestoreREST(v);
+                }
+                const url = 'https://firestore.googleapis.com/v1/projects/' + encodeURIComponent(pId) + '/databases/(default)/documents/' + encodeURIComponent(collectionName) + '/' + encodeURIComponent(id);
+                const resp = await fetch(url, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ fields })
+                });
+                return resp.ok;
+            } catch (e) {
+                console.warn('REST save error for ' + collectionName + ':', e);
+                return false;
+            }
+        };
+
+        const deleteFirestoreDocREST = async (collectionName, docId) => {
+            const pId = window.HYBRID_CONFIG?.firebase?.projectId;
+            if (!pId || !docId) return false;
+            try {
+                const url = 'https://firestore.googleapis.com/v1/projects/' + encodeURIComponent(pId) + '/databases/(default)/documents/' + encodeURIComponent(collectionName) + '/' + encodeURIComponent(docId);
+                const resp = await fetch(url, { method: 'DELETE' });
+                return resp.ok;
+            } catch (e) {
+                console.warn('REST delete error for ' + collectionName + ':', e);
+                return false;
+            }
+        };
+
+        // Firestore Generic Collection Helpers (Dual-Mode: Ultra-fast REST + Resilient SDK Fallback)
         const fsGetCollection = async (collectionName, fallbackLocalKey = null) => {
+            // โหมดความเร็วสูงสุด: ดึงผ่าน Firestore REST API ก่อน (<150ms ไม่ต้องรอ WebChannel Stream)
+            try {
+                const restList = await fetchFirestoreCollectionREST(collectionName);
+                if (Array.isArray(restList) && restList.length > 0) {
+                    if (fallbackLocalKey) {
+                        try { localStorage.setItem(fallbackLocalKey, JSON.stringify(restList)); } catch (e) { }
+                    }
+                    return restList;
+                }
+            } catch (e) { }
+
+            // โหมดสำรอง 1: Firestore SDK (Timeout 2.5 วินาที ป้องกันหน้าเว็บค้าง)
             if (firestoreDb) {
                 try {
-                    const snap = await firestoreDb.collection(collectionName).get();
+                    const snapPromise = firestoreDb.collection(collectionName).get();
+                    const timeoutPromise = new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT')), 2500));
+                    const snap = await Promise.race([snapPromise, timeoutPromise]);
                     const list = [];
                     snap.forEach(doc => list.push({ id: doc.id, ...doc.data() }));
                     if (fallbackLocalKey) {
@@ -669,9 +782,11 @@ const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicI
                     }
                     return list;
                 } catch (e) {
-                    console.warn(`Firestore get ${collectionName} error, fallback to local:`, e);
+                    console.warn('Firestore get ' + collectionName + ' error, fallback to local:', e);
                 }
             }
+
+            // โหมดสำรอง 2: LocalStorage Cache
             if (fallbackLocalKey) {
                 try { return JSON.parse(localStorage.getItem(fallbackLocalKey) || '[]'); } catch (e) { return []; }
             }
@@ -689,14 +804,20 @@ const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicI
                     localStorage.setItem(fallbackLocalKey, JSON.stringify(list));
                 } catch (e) { }
             }
+            let saved = false;
             if (firestoreDb) {
                 try {
                     const ref = docId ? firestoreDb.collection(collectionName).doc(String(docId)) : firestoreDb.collection(collectionName).doc();
                     await ref.set(data, { merge: true });
-                    return { success: true, id: ref.id };
+                    saved = true;
                 } catch (e) {
-                    console.warn(`Firestore save ${collectionName} error:`, e);
+                    console.warn('Firestore save ' + collectionName + ' via SDK error, trying REST:', e);
                 }
+            }
+            if (!saved) {
+                try {
+                    await saveFirestoreDocREST(collectionName, docId || data.id, data);
+                } catch (e) { }
             }
             return { success: true, id: docId || data.id };
         };
@@ -709,13 +830,19 @@ const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicI
                     localStorage.setItem(fallbackLocalKey, JSON.stringify(list));
                 } catch (e) { }
             }
+            let deleted = false;
             if (firestoreDb) {
                 try {
                     await firestoreDb.collection(collectionName).doc(String(docId)).delete();
-                    return { success: true };
+                    deleted = true;
                 } catch (e) {
-                    console.warn(`Firestore delete ${collectionName} error:`, e);
+                    console.warn('Firestore delete ' + collectionName + ' via SDK error, trying REST:', e);
                 }
+            }
+            if (!deleted) {
+                try {
+                    await deleteFirestoreDocREST(collectionName, docId);
+                } catch (e) { }
             }
             return { success: true };
         };
