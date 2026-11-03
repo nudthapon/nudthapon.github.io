@@ -940,9 +940,14 @@ const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicI
 
                     let settingsObj = {};
                     if (Array.isArray(settingsData) && settingsData.length > 0) {
-                        settingsObj = settingsData[0];
+                        const foundGlobal = settingsData.find(s => s && (s.id === 'global_settings' || s._docId === 'global_settings'));
+                        settingsObj = foundGlobal || settingsData.find(s => s && s.apiKey && !s.apiKey.startsWith('***')) || settingsData[0];
                     } else {
                         try { settingsObj = JSON.parse(localStorage.getItem('app_settings') || '{}'); } catch (e) { }
+                    }
+                    const savedLocalKey = localStorage.getItem('app_api_key');
+                    if (savedLocalKey && (!settingsObj.apiKey || settingsObj.apiKey.startsWith('***'))) {
+                        settingsObj.apiKey = savedLocalKey;
                     }
 
                     resolve({
@@ -2297,7 +2302,18 @@ const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicI
             const [lineToken, setLineToken] = React.useState(appSettings.lineToken || '');
             const [notifyStudent, setNotifyStudent] = React.useState(appSettings.notifyStudent ?? true);
             const [notifyReport, setNotifyReport] = React.useState(appSettings.notifyReport ?? true);
-            const [tempApi, setTempApi] = React.useState(apiKey || '');
+            const [tempApi, setTempApi] = React.useState(apiKey || appSettings?.apiKey || localStorage.getItem('app_api_key') || '');
+
+            React.useEffect(() => {
+                const effectiveKey = (apiKey && !apiKey.startsWith('***'))
+                    ? apiKey
+                    : (appSettings?.apiKey && !appSettings.apiKey.startsWith('***'))
+                        ? appSettings.apiKey
+                        : (localStorage.getItem('app_api_key') || '');
+                if (effectiveKey && (!tempApi || tempApi.startsWith('***'))) {
+                    setTempApi(effectiveKey);
+                }
+            }, [apiKey, appSettings?.apiKey]);
             const [googleSheetId, setGoogleSheetId] = React.useState('');
             const [googleDriveFolderId, setGoogleDriveFolderId] = React.useState('');
             const [showSheetHelp, setShowSheetHelp] = React.useState(false);
@@ -2344,7 +2360,17 @@ const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicI
                         } catch (e) { }
                     }
 
-                    // 2. บันทึกข้อมูลตั้งค่าทั่วไป
+                    // 2. บันทึกข้อมูลตั้งค่าทั่วไป (ป้องกันการบันทึกทับด้วยค่าว่างหรือเครื่องหมายดอกจัน)
+                    const currentRealKey = (apiKey && !apiKey.startsWith('***'))
+                        ? apiKey
+                        : (appSettings?.apiKey && !appSettings.apiKey.startsWith('***'))
+                            ? appSettings.apiKey
+                            : (localStorage.getItem('app_api_key') || '');
+
+                    const finalApiKey = (tempApi && !tempApi.startsWith('***'))
+                        ? tempApi.trim()
+                        : currentRealKey;
+
                     const newSettings = {
                         header1: h1, header2: h2, header3: h3,
                         reporterName: rName, reporterPosition: rPos,
@@ -2352,13 +2378,15 @@ const uploadPhotoToTelegramWorker = async (base64Data, fileName, caption, topicI
                         academicHeadName: aHead, academicHeadPos: aPos,
                         directorName: dirH, directorPos: dirPos,
                         lineToken: lineToken, notifyStudent: notifyStudent, notifyReport: notifyReport,
-                        apiKey: tempApi
+                        apiKey: finalApiKey
                     };
 
                     await GAS.saveSettings(newSettings);
                     setAppSettings(newSettings);
-                    if (tempApi && !tempApi.startsWith('***')) {
-                        setApiKey('****************');
+                    setApiKey(finalApiKey);
+                    setTempApi(finalApiKey);
+                    if (finalApiKey) {
+                        try { localStorage.setItem('app_api_key', finalApiKey); } catch (e) { }
                     }
 
                     setNotif({ message: 'บันทึกการตั้งค่าระบบสำเร็จ ✅', type: 'success' });
@@ -38524,6 +38552,12 @@ ${cleanDocForPrompt}
 
                         if (settings.apiKey && !settings.apiKey.startsWith('***')) {
                             setApiKey(settings.apiKey);
+                            try { localStorage.setItem('app_api_key', settings.apiKey); } catch (e) { }
+                        } else {
+                            const localKey = localStorage.getItem('app_api_key');
+                            if (localKey && !localKey.startsWith('***')) {
+                                setApiKey(localKey);
+                            }
                         }
                         setIsLoading(false);
                         return res;
